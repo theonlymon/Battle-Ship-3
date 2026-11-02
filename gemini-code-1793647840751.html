@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ship Battle 3 - Online Multiplayer Edition</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pirata+One&display=swap">
+<!-- PeerJS Library for direct peer-to-peer multiplayer across countries -->
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<style>
+:root{--ink:#f6ecc8;--gold:#f0c660;color-scheme:dark;box-sizing:border-box}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:#0d262b;color:var(--ink);font-family:"Pirata One",Georgia,serif;overflow:hidden;touch-action:none;user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+#panel{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;background:rgba(4,18,20,.85)}
+#panel div{max-width:500px}
+h1{font-size:52px;margin:0 0 4px;font-weight:400;color:var(--gold)}
+p{margin:0 0 12px;font-family:system-ui,sans-serif;font-size:14px;line-height:1.4;color:#c4d6c8}
+p b{color:var(--gold);font-weight:600}
+button{font-family:inherit;font-size:22px;background:var(--gold);color:#2b2208;border:0;border-radius:6px;padding:8px 26px;cursor:pointer;margin:4px}
+button:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
+.mp-box{background:rgba(0,0,0,.4);border:1px solid rgba(240,198,96,.3);border-radius:8px;padding:12px;margin:12px 0}
+input[type="text"]{font-family:system-ui,sans-serif;font-size:16px;padding:8px;border-radius:4px;border:1px solid var(--gold);background:#1a2b2e;color:#fff;width:180px;text-align:center}
+#fire{position:fixed;right:14px;bottom:76px;width:78px;height:78px;border-radius:50%;font-size:18px;padding:0;opacity:.88;z-index:10}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="fire" class="hide">Fire</button>
+<div id="panel"><div>
+<h1 id="title">Ship Battle 3</h1>
+<p id="msg">Three ships against three. Sink the enemy fleet!</p>
+
+<div class="mp-box">
+  <p style="margin-bottom:6px"><b>Multiplayer Mode:</b> Host a game or join a friend worldwide for free.</p>
+  <div id="host-area">
+    <button id="btn-host">Host Online Game</button>
+  </div>
+  <div id="join-area" style="margin-top:8px">
+    <input type="text" id="room-input" placeholder="Enter Room Code">
+    <button id="btn-join">Join Game</button>
+  </div>
+  <p id="net-status" style="margin-top:6px;font-size:13px;color:var(--gold)"></p>
+</div>
+
+<button id="go">Play Offline vs AI</button>
+</div></div>
+
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d'),panel=document.getElementById('panel'),fireBtn=document.getElementById('fire');
+const K=.6,WW=2600,WH=1700,HUD=58,RANGE=470,GAME=300,rnd=Math.random;let W,H,S,DPR,camX=0,camY=0;
+function resize(){DPR=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;S=Math.max(.45,(H-HUD)/640)}
+addEventListener('resize',resize);resize();
+
+// --- Network & Multiplayer Setup (PeerJS) ---
+let peer=null, conn=null, isHost=false, isMultiplayer=false, myPeerId='';
+const netStatus=document.getElementById('net-status');
+
+function initPeer(callback){
+  if(peer) { callback(); return; }
+  netStatus.textContent="Connecting to server...";
+  peer = new Peer();
+  peer.on('open', id => {
+    myPeerId = id;
+    netStatus.textContent = "Ready!";
+    callback();
+  });
+  peer.on('connection', c => {
+    conn = c;
+    isHost = true;
+    isMultiplayer = true;
+    setupConn();
+    startMultiplayer();
+  });
+  peer.on('error', err => { netStatus.textContent = "Error: " + err.type; });
+}
+
+document.getElementById('btn-host').onclick = () => {
+  initPeer(() => {
+    const code = myPeerId.substring(0, 5).toUpperCase();
+    netStatus.innerHTML = `Room Code: <b style="font-size:18px;color:#fff">${code}</b> (Share this with your friend)`;
+  });
+};
+
+document.getElementById('btn-join').onclick = () => {
+  const code = document.getElementById('room-input').value.trim();
+  if(!code) return alert("Please enter a room code!");
+  initPeer(() => {
+    netStatus.textContent = "Connecting to Host...";
+    // Connect to host peer
+    peer.listAllPeers && peer.listAllPeers();
+    // We try connecting directly with full ID or prefix matching
+    conn = peer.connect(code);
+    conn.on('open', () => {
+      isHost = false;
+      isMultiplayer = true;
+      setupConn();
+      netStatus.textContent = "Connected! Starting...";
+      setTimeout(startMultiplayer, 500);
+    });
+  });
+};
+
+function setupConn(){
+  conn.on('data', data => {
+    if(isHost) {
+      // Host receives Player 2 inputs
+      if(data.type === 'input') {
+        const p2 = ships[3]; // Player 2 controls navy ship 0
+        if(p2) { p2.inp = data.inp; if(data.fire) fire(p2, data.ang); }
+      }
+    } else {
+      // Client receives full game state from Host
+      if(data.type === 'state') {
+        ships = data.ships;
+        score = data.score;
+        timeLeft = data.timeLeft;
+        balls = data.balls;
+        fx = data.fx;
+      }
+    }
+  });
+}
+
+function startMultiplayer(){
+  if(isHost) {
+    NAMES[0] = "Player 1 (Host)";
+    NAMES[3] = "Player 2 (Guest)";
+    start();
+  }
+}
+
+// --- Terrain & Realistic Islands ---
+const rad=(is,t)=>Math.max(.55,1+.2*Math.sin(2*t+is.p[0])+.16*Math.sin(3*t+is.p[1])+.1*Math.sin(5*t+is.p[2])+.06*Math.sin(8*t+is.p[3]))*is.R;
+const info=(is,x,y)=>{const ux=(x-is.x)/is.ex,uy=(y-is.y)/is.ey,d=Math.hypot(ux,uy),t=Math.atan2(uy,ux),r=rad(is,t);return{ux,uy,d,t,r,edge:(d-r)*(is.ex+is.ey)/2}};
+const mkI=(x,y,R,ex,ey)=>{const is={x,y,R,ex,ey,p:[rnd()*6.28,rnd()*6.28,rnd()*6.28,rnd()*6.28]};
+ is.palms=Array.from({length:Math.round(R/10)},()=>{const t=rnd()*6.28,d=Math.sqrt(rnd())*.68*rad(is,t);return{ox:Math.cos(t)*d*ex,oy:Math.sin(t)*d*ey,h:35+rnd()*20,l:rnd()*2-1,s:0.8+rnd()*0.5}}).sort((a,b)=>a.oy-b.oy);
+ is.blobs=Array.from({length:Math.round(R/7)},()=>{const t=rnd()*6.28,d=Math.sqrt(rnd())*.6*rad(is,t);return{ox:Math.cos(t)*d*ex,oy:Math.sin(t)*d*ey,r:R*(.12+rnd()*.14),c:rnd()<.5?'#2d5a27':'#1e401a'}});
+ is.rocks=Array.from({length:Math.round(R/18)},()=>{const t=rnd()*6.28,d=rad(is,t)*(0.95+rnd()*.15);return{ox:Math.cos(t)*d*ex,oy:Math.sin(t)*d*ey,r:7+rnd()*9}});
+ return is};
+const islands=[mkI(540,430,190,1.35,.9),mkI(1330,330,170,1.2,1),mkI(2080,520,200,1.1,1.1),mkI(720,1200,210,1.3,.85),mkI(1480,930,160,1,1.2),mkI(2080,1290,190,1.3,.9),mkI(1200,1470,130,1.2,.9),mkI(440,900,105,1,1)];
+const gulls=Array.from({length:14},(_,i)=>({i:i%islands.length,a:rnd()*6.28,sp:.3+rnd()*.3,o:1.05+rnd()*.3,h:55+rnd()*30}));
+const shadows=Array.from({length:7},()=>({x:rnd()*WW,y:rnd()*WH,r:200+rnd()*200,v:14+rnd()*12}));
+let NAMES=['You','RuzzyMan','silveroak','GreatBear','dockhand7','saltypete'];
+let state='ready',ships=[],balls=[],fx=[],score=[0,0],timeLeft=GAME,mouse={x:1300,y:850},ms={x:0,y:0},keys={},touch=false,T=0;
+
+function mk(team,i,name,isP){const sx=team?WW-160:160,sy=560+i*240;return{team,name,isP,sx,x:sx,y:sy,a:team?Math.PI:0,sp:0,hp:4,ammo:3,rl:0,cd:0,reveal:0,hidden:false,dead:false,resp:0,kills:0,aiCd:1+rnd()*1.5,wob:rnd()*6,isl:Math.floor(rnd()*islands.length),ra:rnd()*6.28,rd:rnd()<.5?1:-1,hideT:0,trail:[],inp:{L:0,R:0,F:0,B:0}}}
+function start(){
+  ships=[mk(0,1,NAMES[0],true),mk(0,0,NAMES[1]),mk(0,2,NAMES[2]),mk(1,0,NAMES[3],isMultiplayer),mk(1,1,NAMES[4]),mk(1,2,NAMES[5])];
+  balls=[];fx=[];score=[0,0];timeLeft=GAME;state='play';panel.classList.add('hide');if(touch)fireBtn.classList.remove('hide');
+}
+const norm=a=>{while(a>Math.PI)a-=6.283;while(a<-Math.PI)a+=6.283;return a};
+const volley=s=>Math.min(5,3+Math.floor(s.kills/2));
+const blocked=(x1,y1,x2,y2)=>{for(let i=1;i<10;i++){const x=x1+(x2-x1)*i/10,y=y1+(y2-y1)*i/10;for(const is of islands){const f=info(is,x,y);if(f.d<f.r*.9)return true}}return false};
+const spotted=(e,team)=>{const R=e.hidden&&e.reveal<=0?250:760;return ships.some(a=>a.team===team&&!a.dead&&Math.hypot(a.x-e.x,a.y-e.y)<R)};
+
+function fire(s,ang){
+ if(s.dead||s.ammo<=0||s.cd>0)return;
+ s.ammo--;s.cd=.4;s.reveal=2.5;const n=volley(s);
+ for(let i=0;i<n;i++){
+  const a=ang+(i-(n-1)/2)*.15;
+  // Cannons set to fire slightly slower (310 speed)
+  const v=310*(.98+rnd()*.04);
+  balls.push({x:s.x+Math.cos(a)*40,y:s.y+Math.sin(a)*40,vx:Math.cos(a)*v,vy:Math.sin(a)*v,v,d:0,s});
+ }
+ for(let i=0;i<9;i++)fx.push({x:s.x+Math.cos(ang)*46,y:s.y+Math.sin(ang)*46,z:10,vx:Math.cos(ang)*40+(rnd()-.5)*40,vy:Math.sin(ang)*40+(rnd()-.5)*40,l:.6,m:.6,c:'#ececE4',r:7});
+}
+function splash(x,y,c,n=9){for(let i=0;i<n;i++){const a=rnd()*6.28,v=30+rnd()*70;fx.push({x,y,z:0,vx:Math.cos(a)*v,vy:Math.sin(a)*v,l:.55,m:.55,c:c||'#d4ece4',r:3.5})}}
+
+function updShip(s,dt){
+ if(s.dead){s.resp-=dt;if(s.resp<=0){s.dead=false;s.hp=4;s.ammo=3;s.x=s.sx;s.y=400+rnd()*900;s.a=s.team?Math.PI:0;s.sp=0}return}
+ s.cd-=dt;s.reveal-=dt;s.rl+=dt;if(s.ammo<3&&s.rl>1.6){s.ammo++;s.rl=0}
+ let da=s.a,go=0,manual=false;
+
+ if(s.isP){
+  const inp = (isMultiplayer && !isHost && s.team===1) ? s.inp : {
+    L:keys.a||keys.arrowleft, R:keys.d||keys.arrowright, F:keys.w||keys.arrowup, B:keys.s||keys.arrowdown
+  };
+  if(isMultiplayer && isHost && s.team===1) inp = s.inp; // Guest inputs applied on host
+
+  if(inp.L||inp.R||inp.F||inp.B){
+    manual=true;s.a+=((inp.R?1:0)-(inp.L?1:0))*1.7*dt;go=inp.B&&!inp.F?.2:inp.F?1:.55;
+  }else if(s.team===0 || (isMultiplayer && !isHost && s.team===1)){
+    const dx=mouse.x-s.x,dy=mouse.y-s.y,d=Math.hypot(dx,dy);if(d>60){da=Math.atan2(dy,dx);go=Math.min(1,d/220)}
+  }
+ }else{
+  let tg=null,bd=1e9;for(const e of ships)if(e.team!==s.team&&!e.dead&&spotted(e,s.team)){const d=Math.hypot(e.x-s.x,e.y-s.y);if(d<bd){bd=d;tg=e}}
+  if(tg){s.hideT=0;da=Math.atan2(tg.y-s.y,tg.x-s.x);go=bd>270?1:.45;if(bd<190)da+=1.3;
+   s.aiCd-=dt;if(s.aiCd<=0&&bd<450&&!blocked(s.x,s.y,tg.x,tg.y)){const t=bd/310,ax=tg.x+Math.cos(tg.a)*tg.sp*t,ay=tg.y+Math.sin(tg.a)*tg.sp*t;fire(s,Math.atan2(ay-s.y,ax-s.x)+(rnd()-.5)*.2);s.aiCd=1.1+rnd()*1.2}}
+  else if(s.hideT>0){s.hideT-=dt;go=0}
+  else{const is=islands[s.isl],r=rad(is,s.ra),wx=is.x+Math.cos(s.ra)*(r*is.ex+110),wy=is.y+Math.sin(s.ra)*(r*is.ey+110);
+   if(Math.hypot(wx-s.x,wy-s.y)<110){if(rnd()<.5)s.hideT=6+rnd()*6;else{s.ra+=s.rd*.6;if(rnd()<.2)s.isl=Math.floor(rnd()*islands.length)}}
+   da=Math.atan2(wy-s.y,wx-s.x);go=.75}
+  if(go>0){let rx=0,ry=0;for(const is of islands){const f=info(is,s.x,s.y);if(f.edge<140){const wg=(140-f.edge)/140,nx=(s.x-is.x)/Math.hypot(s.x-is.x,s.y-is.y),ny=(s.y-is.y)/Math.hypot(s.x-is.x,s.y-is.y);rx+=(nx-ny*s.rd*.8)*wg;ry+=(ny+nx*s.rd*.8)*wg}}
+   const w=Math.min(1,Math.hypot(rx,ry));if(w>0){const m=Math.hypot(rx,ry);da=Math.atan2(Math.sin(da)*(1-w)+ry/m*w,Math.cos(da)*(1-w)+rx/m*w)}}
+ }
+ if(!manual)s.a+=Math.max(-1.6*dt,Math.min(1.6*dt,norm(da-s.a)));
+ s.sp+=(go*(s.isP?150:132)-s.sp)*Math.min(1,dt*1.8);
+ s.x+=Math.cos(s.a)*s.sp*dt;s.y+=Math.sin(s.a)*s.sp*dt;
+ s.hidden=false;
+ for(const is of islands){const f=info(is,s.x,s.y);
+  if(f.edge<42){const nd=f.r+84/(is.ex+is.ey);s.x=is.x+f.ux/f.d*nd*is.ex;s.y=is.y+f.uy/f.d*nd*is.ey;s.sp*=.75}
+  else if(f.edge<190&&s.sp<28)s.hidden=true}
+ for(const o of ships)if(o!==s&&!o.dead){const dx=s.x-o.x,dy=s.y-o.y,d=Math.hypot(dx,dy);if(d<70&&d>0){s.x+=dx/d*(70-d)*.5;s.y+=dy/d*(70-d)*.5}}
+ s.x=Math.max(60,Math.min(WW-60,s.x));s.y=Math.max(60,Math.min(WH-60,s.y));
+ if(s.sp>25&&rnd()<dt*18)s.trail.push({x:s.x-Math.cos(s.a)*46,y:s.y-Math.sin(s.a)*46,l:1});
+ s.trail.forEach(p=>p.l-=dt*.8);s.trail=s.trail.filter(p=>p.l>0);
+}
+
+function update(dt){
+ T+=dt;timeLeft-=dt;if(timeLeft<=0){timeLeft=0;return finish()}
+
+ // Send/receive multiplayer sync state
+ if(isMultiplayer) {
+   if(isHost && conn) {
+     conn.send({type:'state', ships, score, timeLeft, balls, fx});
+   } else if(!isHost && conn) {
+     const myInp = {L:keys.a||keys.arrowleft, R:keys.d||keys.arrowright, F:keys.w||keys.arrowup, B:keys.s||keys.arrowdown};
+     const me = ships[3];
+     const ang = me ? Math.atan2(mouse.y-me.y, mouse.x-me.x) : 0;
+     conn.send({type:'input', inp: myInp, fire: false, ang});
+   }
+ }
+
+ if(!isMultiplayer || isHost) {
+   ships.forEach(s=>updShip(s,dt));
+   for(const b of balls){
+    b.x+=b.vx*dt;b.y+=b.vy*dt;b.d+=b.v*dt;
+    for(const s of ships)if(!s.dead&&s.team!==b.s.team&&Math.hypot(s.x-b.x,s.y-b.y)<44){
+     b.d=1e9;s.hp--;splash(b.x,b.y,'#ffb347',12);
+     if(s.hp<=0){s.dead=true;s.resp=4;b.s.kills++;score[b.s.team]++;splash(s.x,s.y,'#444',28);splash(s.x,s.y,'#ff9a3c',20)}
+    }
+    for(const is of islands){const f=info(is,b.x,b.y);if(f.d<f.r*.9){b.d=1e9;splash(b.x,b.y,'#9a8658')}}
+    if(b.d>=RANGE&&b.d<1e8)splash(b.x,b.y);
+   }
+   balls=balls.filter(b=>b.d<RANGE);
+   fx.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.l-=dt});fx=fx.filter(p=>p.l>0);
+ }
+}
+
+function finish(){
+ state='over';
+ document.getElementById('title').textContent=score[0]+' - '+score[1];
+ document.getElementById('msg').textContent=score[0]>score[1]?'Victory! Gold Fleet wins.':score[0]<score[1]?'Defeat! Navy Fleet wins.':'A tie battle!';
+ document.getElementById('go').textContent='Play Again';
+ fireBtn.classList.add('hide');panel.classList.remove('hide');
+}
+
+// --- Ship Drawing ---
+const HULL=[[50,0],[40,8],[10,13],[-24,13],[-42,8],[-46,0],[-42,-8],[-24,-13],[10,-13],[40,-8]],STERN=[[-14,11],[-42,8],[-46,0],[-42,-8],[-14,-11]];
+const MASTS=[{u:24,h:72,t:[[32,52,20],[54,72,14]]},{u:-2,h:90,t:[[32,56,24],[58,80,18]]},{u:-28,h:64,t:[[32,50,18],[52,64,12]]}];
+function drawShip(s){
+ const t0=s.team===0,ca=Math.cos(s.a),sa=Math.sin(s.a),bob=Math.sin(T*2.4+s.wob)*1.6;
+ const L=(u,v,z)=>[s.x+ca*u-sa*v,(s.y+sa*u+ca*v)*K-z-bob];
+ const path=pts=>{ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath()};
+ const hullC=t0?'#6e4521':'#262b36',bandC=t0?'#c79a55':'#5d667b',deckC=t0?'#b08850':'#5a5f6e',stC=t0?'#8d6636':'#3b4150',sc=t0?[244,236,214]:[205,88,80],flag=t0?'#f0c660':'#eceef8';
+ const k=.8+.2*Math.cos(s.a-.7),sail=`rgb(${sc[0]*k|0},${sc[1]*k|0},${sc[2]*k|0})`;
+ ctx.save();ctx.globalAlpha=s.hidden&&s.reveal<=0?.6:1;ctx.lineJoin='round';
+ path(HULL.map(([u,v])=>L(u*1.15,v*1.4,-1)));ctx.fillStyle='rgba(0,0,0,.28)';ctx.fill();
+ const sides=(out,z0,z1,col,m=1)=>{const q=[];for(let i=0;i<out.length;i++){const p=out[i],n=out[(i+1)%out.length];q.push([sa*(p[0]+n[0])+ca*(p[1]+n[1]),[L(p[0]*m,p[1]*m,z0),L(n[0]*m,n[1]*m,z0),L(n[0]*m,n[1]*m,z1),L(p[0]*m,p[1]*m,z1)]])}q.sort((a,b)=>a[0]-b[0]).forEach(([,pts])=>{path(pts);ctx.fillStyle=col;ctx.fill()})};
+ sides(HULL,0,14,hullC);sides(HULL,8,10.5,bandC,1.004);
+ ctx.fillStyle='#120e08';for(const u of[-12,6,24])for(const v of[-13.4,13.4]){const p=L(u,v,5);ctx.beginPath();ctx.arc(p[0],p[1],2.6,0,7);ctx.fill()}
+ path(HULL.map(([u,v])=>L(u,v,14)));ctx.fillStyle=deckC;ctx.fill();ctx.strokeStyle='rgba(0,0,0,.35)';ctx.lineWidth=1.5;ctx.stroke();
+ sides(STERN,14,25,stC);path(STERN.map(([u,v])=>L(u,v,25)));ctx.fillStyle='#a07a45';ctx.fill();
+ const parts=[];
+ MASTS.forEach(m=>parts.push([sa*m.u,()=>{
+  let a=L(m.u,0,14),b=L(m.u,0,m.h);ctx.strokeStyle='#3b2a14';ctx.lineWidth=3.2;ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+  for(const[z1,z2,w]of m.t){const A=L(m.u,-w,z2),B=L(m.u,w,z2),C=L(m.u+4,w*1.05,z1),D=L(m.u+4,-w*1.05,z1),M=L(m.u+10,0,z1-4);
+   ctx.beginPath();ctx.moveTo(A[0],A[1]);ctx.lineTo(B[0],B[1]);ctx.lineTo(C[0],C[1]);ctx.quadraticCurveTo(M[0],M[1],D[0],D[1]);ctx.closePath();ctx.fillStyle=sail;ctx.fill();ctx.strokeStyle='rgba(0,0,0,.28)';ctx.lineWidth=1;ctx.stroke();
+   ctx.strokeStyle='#3b2a14';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(A[0],A[1]);ctx.lineTo(B[0],B[1]);ctx.stroke()}
+  const f1=L(m.u,0,m.h),f2=L(m.u-18,0,m.h-3),f3=L(m.u,0,m.h-9);ctx.fillStyle=flag;ctx.beginPath();ctx.moveTo(f1[0],f1[1]);ctx.lineTo(f2[0],f2[1]);ctx.lineTo(f3[0],f3[1]);ctx.fill()}]));
+ parts.push([sa*52,()=>{const a=L(78,0,27),b=L(26,0,68),c=L(30,0,30),o=L(46,0,15);ctx.strokeStyle='#3b2a14';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(o[0],o[1]);ctx.lineTo(a[0],a[1]);ctx.stroke();ctx.fillStyle=sail;ctx.globalAlpha*=.92;path([a,b,c]);ctx.fill();ctx.globalAlpha/=.92}]);
+ parts.sort((a,b)=>a[0]-b[0]).forEach(p=>p[1]());
+ ctx.restore();
+ const lp=L(0,0,112);ctx.font='17px "Pirata One",Georgia,serif';ctx.textAlign='center';ctx.fillStyle='rgba(0,0,0,.55)';ctx.fillText(s.name+'  '+s.kills,lp[0]+1,lp[1]+1);ctx.fillStyle=t0?'#f6ecc8':'#d6dcff';ctx.fillText(s.name+'  '+s.kills,lp[0],lp[1]);
+ ctx.fillStyle='rgba(0,0,0,.5)';ctx.fillRect(lp[0]-22,lp[1]+6,44,5);ctx.fillStyle=s.hp>1?'#7fd36a':'#e5604f';ctx.fillRect(lp[0]-22,lp[1]+6,44*s.hp/4,5);
+}
+
+// Realistic 3D Palm Tree Renderer
+function palm(x,y,h,l,scale){
+ const tx=x+l*16,ty=y-h;
+ // Trunk with gradient shadow
+ ctx.strokeStyle='#4a3319';ctx.lineWidth=5*scale;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(x,y);ctx.quadraticCurveTo(x+l*4,y-h*.6,tx,ty);ctx.stroke();
+ ctx.strokeStyle='#6b4b27';ctx.lineWidth=3*scale;ctx.beginPath();ctx.moveTo(x,y);ctx.quadraticCurveTo(x+l*4,y-h*.6,tx,ty);ctx.stroke();
+ 
+ // Palm Leaves Layering
+ const leaves = 8;
+ for(let k=0;k<leaves;k++){
+  const a=k/leaves*6.283 + l;
+  const lx = tx + Math.cos(a)*36*scale;
+  const ly = ty + Math.sin(a)*18*scale + 14*scale;
+  
+  ctx.strokeStyle='#1e471d';ctx.lineWidth=4*scale;ctx.beginPath();ctx.moveTo(tx,ty);ctx.quadraticCurveTo(tx+Math.cos(a)*18*scale,ty-14*scale,lx,ly);ctx.stroke();
+  ctx.strokeStyle='#3a8537';ctx.lineWidth=2*scale;ctx.beginPath();ctx.moveTo(tx,ty);ctx.quadraticCurveTo(tx+Math.cos(a)*18*scale,ty-14*scale,lx,ly);ctx.stroke();
+ }
+}
+
+// Enhanced Realistic Island Graphics with Shoreline Shading
+function drawIsland(is){
+ const cx=is.x,cy=is.y*K;
+ const poly=(sc,dy)=>{ctx.beginPath();for(let i=0;i<=72;i++){const t=i/72*6.283,r=rad(is,t)*sc,x=is.x+Math.cos(t)*r*is.ex,y=(is.y+Math.sin(t)*r*is.ey)*K+dy;i?ctx.lineTo(x,y):ctx.moveTo(x,y)}ctx.closePath()};
+ 
+ // Shallow water reef/coastal glow
+ for(const[sc,a]of[[1.55,.15],[1.38,.22],[1.22,.32]]){poly(sc,0);ctx.fillStyle='rgba(76, 201, 185,'+a+')';ctx.fill()}
+ 
+ // Foam wave ring
+ poly(1.05+.012*Math.sin(T*2.2+is.x),2);ctx.strokeStyle='rgba(255,255,255,'+(.45+.15*Math.sin(T*2+is.x))+')';ctx.lineWidth=3.5;ctx.stroke();
+ 
+ // Sandy Beach
+ poly(1,3);ctx.fillStyle='#e3cb96';ctx.fill();
+ 
+ // Cliff / Earth Elevation
+ poly(.91,10);ctx.fillStyle='#3d3224';ctx.fill();
+ poly(.91,4);ctx.fillStyle='#594935';ctx.fill();
+ 
+ // Lush Jungle Center Gradient
+ const g=ctx.createRadialGradient(cx-is.R*.3,cy-is.R*.3*K,5,cx,cy,is.R*1.2);
+ g.addColorStop(0,'#4d8c32');g.addColorStop(0.7,'#29541b');g.addColorStop(1,'#193810');
+ poly(.88,-2);ctx.fillStyle=g;ctx.fill();
+ 
+ // Forest Blobs (3D canopy look)
+ for(const b of is.blobs){
+   ctx.fillStyle=b.c;
+   ctx.beginPath();ctx.ellipse(cx+b.ox,(is.y+b.oy)*K-8,b.r,b.r*.7,0,0,7);ctx.fill();
+   ctx.fillStyle='rgba(255,255,255,0.08)';
+   ctx.beginPath();ctx.ellipse(cx+b.ox-b.r*.2,(is.y+b.oy)*K-8-b.r*.2,b.r*.6,b.r*.4,0,0,7);ctx.fill();
+ }
+ 
+ // Rocks
+ for(const k of is.rocks){
+   const x=cx+k.ox,y=(is.y+k.oy)*K+3;
+   ctx.fillStyle='#5c574f';ctx.beginPath();ctx.ellipse(x,y,k.r,k.r*.65,0,0,7);ctx.fill();
+   ctx.fillStyle='#9e988c';ctx.beginPath();ctx.ellipse(x-1,y-2,k.r*.5,k.r*.3,0,0,7);ctx.fill();
+ }
+ 
+ // Realistic Palm Trees
+ for(const p of is.palms) palm(cx+p.ox,(is.y+p.oy)*K-2,p.h,p.l,p.s);
+}
+
+function cam(dt){
+ const vw=W/S,vh=(H-HUD)/S;
+ const me=isMultiplayer && !isHost ? ships[3] : ships[0];
+ let tx=WW/2-vw/2,ty=WH*K/2-vh/2;if(me){tx=me.x-vw/2;ty=me.y*K-vh/2-30}
+ tx=Math.max(0,Math.min(WW-vw,tx));ty=Math.max(-70,Math.min(WH*K-vh+30,ty));const k=state==='play'?Math.min(1,dt*6):1;camX+=(tx-camX)*k;camY+=(ty-camY)*k;
+ mouse.x=ms.x/S+camX;mouse.y=(ms.y/S+camY)/K;
+}
+
+function draw(){
+ const vw=W/S,vh=(H-HUD)/S;
+ ctx.setTransform(DPR,0,0,DPR,0,0);
+ 
+ // Realistic Ocean Water Shading
+ let g=ctx.createLinearGradient(0,0,0,H);
+ g.addColorStop(0,'#164a4d');g.addColorStop(0.5,'#0e3336');g.addColorStop(1,'#082124');
+ ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+ 
+ ctx.setTransform(DPR*S,0,0,DPR*S,-camX*S*DPR,-camY*S*DPR);
+ 
+ // Dynamic Water Surface Waves
+ ctx.strokeStyle='rgba(160,235,220,.08)';ctx.lineWidth=1.8;
+ for(let y=Math.floor(camY/32)*32;y<camY+vh+32;y+=32){
+   ctx.beginPath();
+   for(let x=Math.floor(camX/28)*28;x<=camX+vw+28;x+=28){
+     const yy=y+Math.sin(x*.02+T*1.2+y*.05)*4;
+     x===Math.floor(camX/28)*28?ctx.moveTo(x,yy):ctx.lineTo(x,yy);
+   }
+   ctx.stroke();
+ }
+ 
+ for(const c of shadows){const gg=ctx.createRadialGradient(c.x,c.y*K,0,c.x,c.y*K,c.r);gg.addColorStop(0,'rgba(0,15,20,.18)');gg.addColorStop(1,'rgba(0,15,20,0)');ctx.fillStyle=gg;ctx.fillRect(c.x-c.r,c.y*K-c.r,c.r*2,c.r*2)}
+ for(const s of ships)for(const p of s.trail){ctx.fillStyle='rgba(215,245,240,'+p.l*.35+')';ctx.beginPath();ctx.ellipse(p.x,p.y*K,16*p.l+5,6*p.l+2,0,0,7);ctx.fill()}
+ 
+ const items=[];islands.forEach(is=>items.push([is.y,()=>drawIsland(is)]));
+ ships.forEach(s=>{if(!s.dead&&(s.team===0||spotted(s,0)))items.push([s.y,()=>drawShip(s)])});
+ items.sort((a,b)=>a[0]-b[0]).forEach(i=>i[1]());
+ 
+ // Straight Cannonballs (No arc/throwing animation)
+ for(const b of balls){
+  const y=b.y*K;
+  ctx.fillStyle='rgba(0,0,0,.35)';ctx.beginPath();ctx.ellipse(b.x,y+4,6,3,0,0,7);ctx.fill();
+  ctx.fillStyle='#111';ctx.beginPath();ctx.arc(b.x,y,6.5,0,7);ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.6)';ctx.beginPath();ctx.arc(b.x-2,y-2,2,0,7);ctx.fill();
+ }
+ 
+ for(const p of fx){ctx.globalAlpha=Math.max(0,p.l/p.m);ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y*K,p.r*(1.4-p.l/p.m*.4),0,7);ctx.fill()}
+ ctx.globalAlpha=1;ctx.strokeStyle='#fff';ctx.lineWidth=2;
+ for(const q of gulls){const is=islands[q.i],gx=is.x+Math.cos(q.a)*is.R*q.o*is.ex,gy=(is.y+Math.sin(q.a)*is.R*q.o*is.ey)*K-q.h,f=Math.sin(T*9+q.a*5)*4;ctx.beginPath();ctx.moveTo(gx-7,gy-f);ctx.lineTo(gx,gy+2);ctx.lineTo(gx+7,gy-f);ctx.stroke()}
+ 
+ ctx.setTransform(DPR,0,0,DPR,0,0);
+ g=ctx.createRadialGradient(W/2,(H-HUD)/2,Math.min(W,H)*.35,W/2,(H-HUD)/2,Math.max(W,H)*.75);g.addColorStop(0,'rgba(0,12,16,0)');g.addColorStop(1,'rgba(0,12,16,.4)');ctx.fillStyle=g;ctx.fillRect(0,0,W,H-HUD);
+ 
+ const me=isMultiplayer && !isHost ? ships[3] : ships[0];
+ if(me&&state==='play'){
+  if(!me.dead){ctx.strokeStyle='rgba(255,240,170,.65)';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(ms.x,ms.y,14,9,0,0,7);ctx.moveTo(ms.x-20,ms.y);ctx.lineTo(ms.x+20,ms.y);ctx.moveTo(ms.x,ms.y-13);ctx.lineTo(ms.x,ms.y+13);ctx.stroke()}
+  else{ctx.fillStyle='#f6ecc8';ctx.font='40px "Pirata One",Georgia,serif';ctx.textAlign='center';ctx.fillText('Sunk! Back in '+Math.ceil(me.resp)+'...',W/2,(H-HUD)/2)}
+ }
+ 
+ // Minimap
+ const mw=Math.min(190,W*.3),mh=mw*WH/WW,mx=W-mw-12,my=12,f=mw/WW;
+ ctx.fillStyle='rgba(8,34,38,.65)';ctx.fillRect(mx,my,mw,mh);ctx.strokeStyle='rgba(246,236,200,.5)';ctx.lineWidth=1;ctx.strokeRect(mx,my,mw,mh);
+ for(const is of islands){ctx.beginPath();for(let i=0;i<=36;i++){const t=i/36*6.283,r=rad(is,t);const x=mx+(is.x+Math.cos(t)*r*is.ex)*f,y=my+(is.y+Math.sin(t)*r*is.ey)*f;i?ctx.lineTo(x,y):ctx.moveTo(x,y)}ctx.closePath();ctx.fillStyle='#4d8c32';ctx.fill()}
+ for(const s of ships)if(!s.dead&&(s.team===0||spotted(s,0))){ctx.fillStyle=s.team?'#ff7a70':s.isP?'#fff':'#f0c660';ctx.beginPath();ctx.arc(mx+s.x*f,my+s.y*f,s.isP?3.5:2.8,0,7);ctx.fill()}
+ ctx.strokeStyle='rgba(255,255,255,.55)';ctx.strokeRect(mx+camX*f,my+camY/K*f,vw*f,vh/K*f);
+ 
+ // HUD Header
+ const hy=H-HUD,cy=hy+HUD/2+2;
+ ctx.fillStyle='#d9cf8f';ctx.fillRect(0,hy,W,HUD);ctx.fillStyle='rgba(60,45,10,.35)';ctx.fillRect(0,hy,W,3);
+ ctx.fillStyle='#3a2a0a';ctx.font='20px "Pirata One",Georgia,serif';ctx.textAlign='left';ctx.textBaseline='middle';
+ ctx.fillText('Health',14,cy);for(let i=0;i<4;i++){ctx.fillStyle=me&&i<me.hp?'#7a4a1a':'rgba(60,45,10,.2)';ctx.beginPath();ctx.roundRect(78+i*24,cy-12,18,24,4);ctx.fill()}
+ ctx.fillStyle='#3a2a0a';ctx.fillText('Ammo',190,cy);for(let i=0;i<3;i++){ctx.fillStyle=me&&i<me.ammo?'#1d1a10':'rgba(60,45,10,.2)';ctx.beginPath();ctx.arc(256+i*24,cy,9,0,7);ctx.fill()}
+ ctx.fillStyle='#3a2a0a';ctx.fillText('Volley x'+(me?volley(me):3),340,cy);
+ if(W>760){ctx.fillStyle=me&&me.hidden&&me.reveal<=0?'#2f6b2a':'rgba(60,45,10,.35)';ctx.fillText(me&&me.hidden&&me.reveal<=0?'Hidden':'Exposed',440,cy)}
+ ctx.fillStyle='#3a2a0a';ctx.textAlign='right';ctx.fillText('Gold '+score[0]+' - '+score[1]+' Navy',W-14,cy);
+ ctx.textAlign='center';ctx.font='26px "Pirata One",Georgia,serif';const m=Math.floor(timeLeft/60),sec=Math.floor(timeLeft%60);ctx.fillText(m+':'+(sec<10?'0':'')+sec,W/2,cy);ctx.textBaseline='alphabetic';
+}
+
+const setMouse=e=>{ms.x=e.clientX;ms.y=e.clientY;mouse.x=ms.x/S+camX;mouse.y=(ms.y/S+camY)/K};
+const shoot=()=>{
+  if(state!=='play') return;
+  if(isMultiplayer && !isHost) {
+    const me = ships[3];
+    if(me && conn) conn.send({type:'input', inp:{}, fire: true, ang: Math.atan2(mouse.y-me.y, mouse.x-me.x)});
+  } else {
+    const me = ships[0];
+    if(me) fire(me, Math.atan2(mouse.y-me.y, mouse.x-me.x));
+  }
+};
+
+cv.addEventListener('pointermove',e=>{if(e.pointerType==='touch')touch=true;setMouse(e)});
+cv.addEventListener('pointerdown',e=>{setMouse(e);if(e.pointerType==='touch'){touch=true;if(state==='play')fireBtn.classList.remove('hide')}else shoot()});
+fireBtn.addEventListener('pointerdown',e=>{e.stopPropagation();shoot()});
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();keys[k]=true;if(k===' '||k.startsWith('arrow'))e.preventDefault();if(k===' '){state==='play'?shoot():start()}});
+addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false});addEventListener('blur',()=>{keys={}});
+document.getElementById('go').onclick=()=>{ isMultiplayer=false; start(); };
+
+let last=performance.now();
+function loop(n){const dt=Math.min(.05,(n-last)/1000);last=n;cam(dt);if(state==='play')update(dt);else T+=dt;gulls.forEach(g=>g.a+=g.sp*dt);shadows.forEach(c=>{c.x+=c.v*dt;if(c.x>WW+c.r)c.x=-c.r});draw();requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
