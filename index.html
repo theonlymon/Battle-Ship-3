@@ -53,7 +53,6 @@ const K=.6,WW=2600,WH=1700,HUD=58,RANGE=470,GAME=300,rnd=Math.random;let W,H,S,D
 function resize(){DPR=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;S=Math.max(.45,(H-HUD)/640)}
 addEventListener('resize',resize);resize();
 
-// --- Network & Multiplayer Setup (PeerJS with stable public config) ---
 let peer=null, conn=null, isHost=false, isMultiplayer=false, myPeerId='';
 const netStatus=document.getElementById('net-status');
 
@@ -61,7 +60,6 @@ function initPeer(callback){
   if(peer && !peer.destroyed) { callback(); return; }
   netStatus.textContent="Connecting to server...";
   
-  // Using reliable public PeerJS cloud server configurations
   peer = new Peer({
     host: '0.peerjs.com',
     port: 443,
@@ -83,24 +81,21 @@ function initPeer(callback){
   });
   peer.on('error', err => { 
     netStatus.textContent = "Connection Error: " + err.type;
-    console.error(err);
   });
 }
 
 document.getElementById('btn-host').onclick = () => {
   initPeer(() => {
-    // Generate a clean 5-character uppercase room code from peer ID
-    const code = myPeerId ? myPeerId.substring(0, 5).toUpperCase() : Math.random().toString(36.substring(2, 7)).toUpperCase();
+    const code = myPeerId ? myPeerId.substring(0, 5).toUpperCase() : "ROOM1";
     netStatus.innerHTML = `Room Code: <b style="font-size:18px;color:#fff">${code}</b> (Share this with your friend)`;
   });
 };
 
 document.getElementById('btn-join').onclick = () => {
-  const code = document.getElementById('room-input').value.trim().toLowerCase();
+  const code = document.getElementById('room-input').value.trim();
   if(!code) return alert("Please enter a room code!");
   initPeer(() => {
     netStatus.textContent = "Connecting to Host...";
-    // Connect using the code prefix
     conn = peer.connect(code);
     setupConn();
     conn.on('open', () => {
@@ -142,7 +137,6 @@ function startMultiplayer(){
   }
 }
 
-// --- Terrain & Realistic Islands ---
 const rad=(is,t)=>Math.max(.55,1+.2*Math.sin(2*t+is.p[0])+.16*Math.sin(3*t+is.p[1])+.1*Math.sin(5*t+is.p[2])+.06*Math.sin(8*t+is.p[3]))*is.R;
 const info=(is,x,y)=>{const ux=(x-is.x)/is.ex,uy=(y-is.y)/is.ey,d=Math.hypot(ux,uy),t=Math.atan2(uy,ux),r=rad(is,t);return{ux,uy,d,t,r,edge:(d-r)*(is.ex+is.ey)/2}};
 const mkI=(x,y,R,ex,ey)=>{const is={x,y,R,ex,ey,p:[rnd()*6.28,rnd()*6.28,rnd()*6.28,rnd()*6.28]};
@@ -184,7 +178,7 @@ function updShip(s,dt){
  let da=s.a,go=0,manual=false;
 
  if(s.isP){
-  const inp = (isMultiplayer && !isHost && s.team===1) ? s.inp : {
+  let inp = (isMultiplayer && !isHost && s.team===1) ? s.inp : {
     L:keys.a||keys.arrowleft, R:keys.d||keys.arrowright, F:keys.w||keys.arrowup, B:keys.s||keys.arrowdown
   };
   if(isMultiplayer && isHost && s.team===1) inp = s.inp;
@@ -206,7 +200,7 @@ function updShip(s,dt){
    const w=Math.min(1,Math.hypot(rx,ry));if(w>0){const m=Math.hypot(rx,ry);da=Math.atan2(Math.sin(da)*(1-w)+ry/m*w,Math.cos(da)*(1-w)+rx/m*w)}}
  }
  if(!manual)s.a+=Math.max(-1.6*dt,Math.min(1.6*dt,norm(da-s.a)));
- s.sp+=(go*(s.isP?150:132)-s.sp)!*Math.min(1,dt*1.8);
+ s.sp+=(go*(s.isP?150:132)-s.sp)*Math.min(1,dt*1.8);
  s.x+=Math.cos(s.a)*s.sp*dt;s.y+=Math.sin(s.a)*s.sp*dt;
  s.hidden=false;
  for(const is of islands){const f=info(is,s.x,s.y);
@@ -256,7 +250,6 @@ function finish(){
  fireBtn.classList.add('hide');panel.classList.remove('hide');
 }
 
-// --- Ship Drawing ---
 const HULL=[[50,0],[40,8],[10,13],[-24,13],[-42,8],[-46,0],[-42,-8],[-24,-13],[10,-13],[40,-8]],STERN=[[-14,11],[-42,8],[-46,0],[-42,-8],[-14,-11]];
 const MASTS=[{u:24,h:72,t:[[32,52,20],[54,72,14]]},{u:-2,h:90,t:[[32,56,24],[58,80,18]]},{u:-28,h:64,t:[[32,50,18],[52,64,12]]}];
 function drawShip(s){
@@ -368,7 +361,7 @@ function draw(){
  const me=isMultiplayer && !isHost ? ships[3] : ships[0];
  if(me&&state==='play'){
   if(!me.dead){ctx.strokeStyle='rgba(255,240,170,.65)';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(ms.x,ms.y,14,9,0,0,7);ctx.moveTo(ms.x-20,ms.y);ctx.lineTo(ms.x+20,ms.y);ctx.moveTo(ms.x,ms.y-13);ctx.lineTo(ms.x,ms.y+13);ctx.stroke()}
-  else{ctx.fillStyle='#f6ecc8';ctx.font='40px "Pirata One",Georgia,serif';ctx.textAlign='center';ctx.fillText('Sunk! Back in '+Math.ceil(me.resp)+'...',W/2,(H-HUD)/2)}
+  else{ctx.fillStyle='#f6ecc8';font='40px "Pirata One",Georgia,serif';ctx.textAlign='center';ctx.fillText('Sunk! Back in '+Math.ceil(me.resp)+'...',W/2,(H-HUD)/2)}
  }
  const mw=Math.min(190,W*.3),mh=mw*WH/WW,mx=W-mw-12,my=12,f=mw/WW;
  ctx.fillStyle='rgba(8,34,38,.65)';ctx.fillRect(mx,my,mw,mh);ctx.strokeStyle='rgba(246,236,200,.5)';ctx.lineWidth=1;ctx.strokeRect(mx,my,mw,mh);
