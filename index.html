@@ -41,7 +41,7 @@ input[type="text"]{font-family:system-ui,sans-serif;font-size:16px;padding:8px;b
     <input type="text" id="room-input" placeholder="Enter Room Code">
     <button id="btn-join">Join Game</button>
   </div>
-  <p id="net-status" style="margin-top:6px;font-size:13px;color:var(--gold)"></p>
+  <p id="net-status" style="margin-top:6px;font-size:13px;color:var(--gold)">Click Host or enter code to connect</p>
 </div>
 
 <button id="go">Play Offline vs AI</button>
@@ -53,17 +53,25 @@ const K=.6,WW=2600,WH=1700,HUD=58,RANGE=470,GAME=300,rnd=Math.random;let W,H,S,D
 function resize(){DPR=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;S=Math.max(.45,(H-HUD)/640)}
 addEventListener('resize',resize);resize();
 
-// --- Network & Multiplayer Setup (PeerJS) ---
+// --- Network & Multiplayer Setup (PeerJS with stable public config) ---
 let peer=null, conn=null, isHost=false, isMultiplayer=false, myPeerId='';
 const netStatus=document.getElementById('net-status');
 
 function initPeer(callback){
-  if(peer) { callback(); return; }
+  if(peer && !peer.destroyed) { callback(); return; }
   netStatus.textContent="Connecting to server...";
-  peer = new Peer();
+  
+  // Using reliable public PeerJS cloud server configurations
+  peer = new Peer({
+    host: '0.peerjs.com',
+    port: 443,
+    secure: true,
+    debug: 1
+  });
+
   peer.on('open', id => {
     myPeerId = id;
-    netStatus.textContent = "Ready!";
+    netStatus.textContent = "Connected to server!";
     callback();
   });
   peer.on('connection', c => {
@@ -73,31 +81,36 @@ function initPeer(callback){
     setupConn();
     startMultiplayer();
   });
-  peer.on('error', err => { netStatus.textContent = "Error: " + err.type; });
+  peer.on('error', err => { 
+    netStatus.textContent = "Connection Error: " + err.type;
+    console.error(err);
+  });
 }
 
 document.getElementById('btn-host').onclick = () => {
   initPeer(() => {
-    const code = myPeerId.substring(0, 5).toUpperCase();
+    // Generate a clean 5-character uppercase room code from peer ID
+    const code = myPeerId ? myPeerId.substring(0, 5).toUpperCase() : Math.random().toString(36.substring(2, 7)).toUpperCase();
     netStatus.innerHTML = `Room Code: <b style="font-size:18px;color:#fff">${code}</b> (Share this with your friend)`;
   });
 };
 
 document.getElementById('btn-join').onclick = () => {
-  const code = document.getElementById('room-input').value.trim();
+  const code = document.getElementById('room-input').value.trim().toLowerCase();
   if(!code) return alert("Please enter a room code!");
   initPeer(() => {
     netStatus.textContent = "Connecting to Host...";
-    // Connect to host peer
-    peer.listAllPeers && peer.listAllPeers();
-    // We try connecting directly with full ID or prefix matching
+    // Connect using the code prefix
     conn = peer.connect(code);
+    setupConn();
     conn.on('open', () => {
       isHost = false;
       isMultiplayer = true;
-      setupConn();
-      netStatus.textContent = "Connected! Starting...";
+      netStatus.textContent = "Connected to Friend! Starting...";
       setTimeout(startMultiplayer, 500);
+    });
+    conn.on('error', err => {
+      netStatus.textContent = "Failed to connect to room.";
     });
   });
 };
@@ -105,13 +118,11 @@ document.getElementById('btn-join').onclick = () => {
 function setupConn(){
   conn.on('data', data => {
     if(isHost) {
-      // Host receives Player 2 inputs
       if(data.type === 'input') {
-        const p2 = ships[3]; // Player 2 controls navy ship 0
+        const p2 = ships[3];
         if(p2) { p2.inp = data.inp; if(data.fire) fire(p2, data.ang); }
       }
     } else {
-      // Client receives full game state from Host
       if(data.type === 'state') {
         ships = data.ships;
         score = data.score;
@@ -160,7 +171,6 @@ function fire(s,ang){
  s.ammo--;s.cd=.4;s.reveal=2.5;const n=volley(s);
  for(let i=0;i<n;i++){
   const a=ang+(i-(n-1)/2)*.15;
-  // Cannons set to fire slightly slower (310 speed)
   const v=310*(.98+rnd()*.04);
   balls.push({x:s.x+Math.cos(a)*40,y:s.y+Math.sin(a)*40,vx:Math.cos(a)*v,vy:Math.sin(a)*v,v,d:0,s});
  }
@@ -177,7 +187,7 @@ function updShip(s,dt){
   const inp = (isMultiplayer && !isHost && s.team===1) ? s.inp : {
     L:keys.a||keys.arrowleft, R:keys.d||keys.arrowright, F:keys.w||keys.arrowup, B:keys.s||keys.arrowdown
   };
-  if(isMultiplayer && isHost && s.team===1) inp = s.inp; // Guest inputs applied on host
+  if(isMultiplayer && isHost && s.team===1) inp = s.inp;
 
   if(inp.L||inp.R||inp.F||inp.B){
     manual=true;s.a+=((inp.R?1:0)-(inp.L?1:0))*1.7*dt;go=inp.B&&!inp.F?.2:inp.F?1:.55;
@@ -196,7 +206,7 @@ function updShip(s,dt){
    const w=Math.min(1,Math.hypot(rx,ry));if(w>0){const m=Math.hypot(rx,ry);da=Math.atan2(Math.sin(da)*(1-w)+ry/m*w,Math.cos(da)*(1-w)+rx/m*w)}}
  }
  if(!manual)s.a+=Math.max(-1.6*dt,Math.min(1.6*dt,norm(da-s.a)));
- s.sp+=(go*(s.isP?150:132)-s.sp)*Math.min(1,dt*1.8);
+ s.sp+=(go*(s.isP?150:132)-s.sp)!*Math.min(1,dt*1.8);
  s.x+=Math.cos(s.a)*s.sp*dt;s.y+=Math.sin(s.a)*s.sp*dt;
  s.hidden=false;
  for(const is of islands){const f=info(is,s.x,s.y);
@@ -211,7 +221,6 @@ function updShip(s,dt){
 function update(dt){
  T+=dt;timeLeft-=dt;if(timeLeft<=0){timeLeft=0;return finish()}
 
- // Send/receive multiplayer sync state
  if(isMultiplayer) {
    if(isHost && conn) {
      conn.send({type:'state', ships, score, timeLeft, balls, fx});
@@ -277,64 +286,42 @@ function drawShip(s){
  ctx.fillStyle='rgba(0,0,0,.5)';ctx.fillRect(lp[0]-22,lp[1]+6,44,5);ctx.fillStyle=s.hp>1?'#7fd36a':'#e5604f';ctx.fillRect(lp[0]-22,lp[1]+6,44*s.hp/4,5);
 }
 
-// Realistic 3D Palm Tree Renderer
 function palm(x,y,h,l,scale){
  const tx=x+l*16,ty=y-h;
- // Trunk with gradient shadow
  ctx.strokeStyle='#4a3319';ctx.lineWidth=5*scale;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(x,y);ctx.quadraticCurveTo(x+l*4,y-h*.6,tx,ty);ctx.stroke();
  ctx.strokeStyle='#6b4b27';ctx.lineWidth=3*scale;ctx.beginPath();ctx.moveTo(x,y);ctx.quadraticCurveTo(x+l*4,y-h*.6,tx,ty);ctx.stroke();
- 
- // Palm Leaves Layering
  const leaves = 8;
  for(let k=0;k<leaves;k++){
   const a=k/leaves*6.283 + l;
   const lx = tx + Math.cos(a)*36*scale;
   const ly = ty + Math.sin(a)*18*scale + 14*scale;
-  
   ctx.strokeStyle='#1e471d';ctx.lineWidth=4*scale;ctx.beginPath();ctx.moveTo(tx,ty);ctx.quadraticCurveTo(tx+Math.cos(a)*18*scale,ty-14*scale,lx,ly);ctx.stroke();
   ctx.strokeStyle='#3a8537';ctx.lineWidth=2*scale;ctx.beginPath();ctx.moveTo(tx,ty);ctx.quadraticCurveTo(tx+Math.cos(a)*18*scale,ty-14*scale,lx,ly);ctx.stroke();
  }
 }
 
-// Enhanced Realistic Island Graphics with Shoreline Shading
 function drawIsland(is){
  const cx=is.x,cy=is.y*K;
  const poly=(sc,dy)=>{ctx.beginPath();for(let i=0;i<=72;i++){const t=i/72*6.283,r=rad(is,t)*sc,x=is.x+Math.cos(t)*r*is.ex,y=(is.y+Math.sin(t)*r*is.ey)*K+dy;i?ctx.lineTo(x,y):ctx.moveTo(x,y)}ctx.closePath()};
- 
- // Shallow water reef/coastal glow
  for(const[sc,a]of[[1.55,.15],[1.38,.22],[1.22,.32]]){poly(sc,0);ctx.fillStyle='rgba(76, 201, 185,'+a+')';ctx.fill()}
- 
- // Foam wave ring
  poly(1.05+.012*Math.sin(T*2.2+is.x),2);ctx.strokeStyle='rgba(255,255,255,'+(.45+.15*Math.sin(T*2+is.x))+')';ctx.lineWidth=3.5;ctx.stroke();
- 
- // Sandy Beach
  poly(1,3);ctx.fillStyle='#e3cb96';ctx.fill();
- 
- // Cliff / Earth Elevation
  poly(.91,10);ctx.fillStyle='#3d3224';ctx.fill();
  poly(.91,4);ctx.fillStyle='#594935';ctx.fill();
- 
- // Lush Jungle Center Gradient
  const g=ctx.createRadialGradient(cx-is.R*.3,cy-is.R*.3*K,5,cx,cy,is.R*1.2);
  g.addColorStop(0,'#4d8c32');g.addColorStop(0.7,'#29541b');g.addColorStop(1,'#193810');
  poly(.88,-2);ctx.fillStyle=g;ctx.fill();
- 
- // Forest Blobs (3D canopy look)
  for(const b of is.blobs){
    ctx.fillStyle=b.c;
    ctx.beginPath();ctx.ellipse(cx+b.ox,(is.y+b.oy)*K-8,b.r,b.r*.7,0,0,7);ctx.fill();
    ctx.fillStyle='rgba(255,255,255,0.08)';
    ctx.beginPath();ctx.ellipse(cx+b.ox-b.r*.2,(is.y+b.oy)*K-8-b.r*.2,b.r*.6,b.r*.4,0,0,7);ctx.fill();
  }
- 
- // Rocks
  for(const k of is.rocks){
    const x=cx+k.ox,y=(is.y+k.oy)*K+3;
    ctx.fillStyle='#5c574f';ctx.beginPath();ctx.ellipse(x,y,k.r,k.r*.65,0,0,7);ctx.fill();
    ctx.fillStyle='#9e988c';ctx.beginPath();ctx.ellipse(x-1,y-2,k.r*.5,k.r*.3,0,0,7);ctx.fill();
  }
- 
- // Realistic Palm Trees
  for(const p of is.palms) palm(cx+p.ox,(is.y+p.oy)*K-2,p.h,p.l,p.s);
 }
 
@@ -349,15 +336,10 @@ function cam(dt){
 function draw(){
  const vw=W/S,vh=(H-HUD)/S;
  ctx.setTransform(DPR,0,0,DPR,0,0);
- 
- // Realistic Ocean Water Shading
  let g=ctx.createLinearGradient(0,0,0,H);
  g.addColorStop(0,'#164a4d');g.addColorStop(0.5,'#0e3336');g.addColorStop(1,'#082124');
  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
- 
  ctx.setTransform(DPR*S,0,0,DPR*S,-camX*S*DPR,-camY*S*DPR);
- 
- // Dynamic Water Surface Waves
  ctx.strokeStyle='rgba(160,235,220,.08)';ctx.lineWidth=1.8;
  for(let y=Math.floor(camY/32)*32;y<camY+vh+32;y+=32){
    ctx.beginPath();
@@ -367,43 +349,32 @@ function draw(){
    }
    ctx.stroke();
  }
- 
  for(const c of shadows){const gg=ctx.createRadialGradient(c.x,c.y*K,0,c.x,c.y*K,c.r);gg.addColorStop(0,'rgba(0,15,20,.18)');gg.addColorStop(1,'rgba(0,15,20,0)');ctx.fillStyle=gg;ctx.fillRect(c.x-c.r,c.y*K-c.r,c.r*2,c.r*2)}
  for(const s of ships)for(const p of s.trail){ctx.fillStyle='rgba(215,245,240,'+p.l*.35+')';ctx.beginPath();ctx.ellipse(p.x,p.y*K,16*p.l+5,6*p.l+2,0,0,7);ctx.fill()}
- 
  const items=[];islands.forEach(is=>items.push([is.y,()=>drawIsland(is)]));
  ships.forEach(s=>{if(!s.dead&&(s.team===0||spotted(s,0)))items.push([s.y,()=>drawShip(s)])});
  items.sort((a,b)=>a[0]-b[0]).forEach(i=>i[1]());
- 
- // Straight Cannonballs (No arc/throwing animation)
  for(const b of balls){
   const y=b.y*K;
   ctx.fillStyle='rgba(0,0,0,.35)';ctx.beginPath();ctx.ellipse(b.x,y+4,6,3,0,0,7);ctx.fill();
   ctx.fillStyle='#111';ctx.beginPath();ctx.arc(b.x,y,6.5,0,7);ctx.fill();
   ctx.fillStyle='rgba(255,255,255,.6)';ctx.beginPath();ctx.arc(b.x-2,y-2,2,0,7);ctx.fill();
  }
- 
  for(const p of fx){ctx.globalAlpha=Math.max(0,p.l/p.m);ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y*K,p.r*(1.4-p.l/p.m*.4),0,7);ctx.fill()}
  ctx.globalAlpha=1;ctx.strokeStyle='#fff';ctx.lineWidth=2;
  for(const q of gulls){const is=islands[q.i],gx=is.x+Math.cos(q.a)*is.R*q.o*is.ex,gy=(is.y+Math.sin(q.a)*is.R*q.o*is.ey)*K-q.h,f=Math.sin(T*9+q.a*5)*4;ctx.beginPath();ctx.moveTo(gx-7,gy-f);ctx.lineTo(gx,gy+2);ctx.lineTo(gx+7,gy-f);ctx.stroke()}
- 
  ctx.setTransform(DPR,0,0,DPR,0,0);
  g=ctx.createRadialGradient(W/2,(H-HUD)/2,Math.min(W,H)*.35,W/2,(H-HUD)/2,Math.max(W,H)*.75);g.addColorStop(0,'rgba(0,12,16,0)');g.addColorStop(1,'rgba(0,12,16,.4)');ctx.fillStyle=g;ctx.fillRect(0,0,W,H-HUD);
- 
  const me=isMultiplayer && !isHost ? ships[3] : ships[0];
  if(me&&state==='play'){
   if(!me.dead){ctx.strokeStyle='rgba(255,240,170,.65)';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(ms.x,ms.y,14,9,0,0,7);ctx.moveTo(ms.x-20,ms.y);ctx.lineTo(ms.x+20,ms.y);ctx.moveTo(ms.x,ms.y-13);ctx.lineTo(ms.x,ms.y+13);ctx.stroke()}
   else{ctx.fillStyle='#f6ecc8';ctx.font='40px "Pirata One",Georgia,serif';ctx.textAlign='center';ctx.fillText('Sunk! Back in '+Math.ceil(me.resp)+'...',W/2,(H-HUD)/2)}
  }
- 
- // Minimap
  const mw=Math.min(190,W*.3),mh=mw*WH/WW,mx=W-mw-12,my=12,f=mw/WW;
  ctx.fillStyle='rgba(8,34,38,.65)';ctx.fillRect(mx,my,mw,mh);ctx.strokeStyle='rgba(246,236,200,.5)';ctx.lineWidth=1;ctx.strokeRect(mx,my,mw,mh);
  for(const is of islands){ctx.beginPath();for(let i=0;i<=36;i++){const t=i/36*6.283,r=rad(is,t);const x=mx+(is.x+Math.cos(t)*r*is.ex)*f,y=my+(is.y+Math.sin(t)*r*is.ey)*f;i?ctx.lineTo(x,y):ctx.moveTo(x,y)}ctx.closePath();ctx.fillStyle='#4d8c32';ctx.fill()}
  for(const s of ships)if(!s.dead&&(s.team===0||spotted(s,0))){ctx.fillStyle=s.team?'#ff7a70':s.isP?'#fff':'#f0c660';ctx.beginPath();ctx.arc(mx+s.x*f,my+s.y*f,s.isP?3.5:2.8,0,7);ctx.fill()}
  ctx.strokeStyle='rgba(255,255,255,.55)';ctx.strokeRect(mx+camX*f,my+camY/K*f,vw*f,vh/K*f);
- 
- // HUD Header
  const hy=H-HUD,cy=hy+HUD/2+2;
  ctx.fillStyle='#d9cf8f';ctx.fillRect(0,hy,W,HUD);ctx.fillStyle='rgba(60,45,10,.35)';ctx.fillRect(0,hy,W,3);
  ctx.fillStyle='#3a2a0a';ctx.font='20px "Pirata One",Georgia,serif';ctx.textAlign='left';ctx.textBaseline='middle';
