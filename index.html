@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ship Battle 3 - Online Multiplayer Edition</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pirata+One&display=swap">
-<!-- PeerJS Library for direct peer-to-peer multiplayer across countries -->
-<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<!-- Socket.io for rock-solid real-time multiplayer connections -->
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <style>
 :root{--ink:#f6ecc8;--gold:#f0c660;color-scheme:dark;box-sizing:border-box}
 *{box-sizing:border-box}
@@ -53,90 +53,99 @@ const K=.6,WW=2600,WH=1700,HUD=58,RANGE=470,GAME=300,rnd=Math.random;let W,H,S,D
 function resize(){DPR=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;S=Math.max(.45,(H-HUD)/640)}
 addEventListener('resize',resize);resize();
 
-let peer=null, conn=null, isHost=false, isMultiplayer=false, myPeerId='';
-const netStatus=document.getElementById('net-status');
+// --- Socket.io Multiplayer Connection ---
+let socket = null, roomCode = '', isHost = false, isMultiplayer = false;
+const netStatus = document.getElementById('net-status');
 
-function initPeer(callback){
-  if(peer && !peer.destroyed) { callback(); return; }
-  netStatus.textContent="Connecting to server...";
+function connectSocket(cb) {
+  if (socket) { cb(); return; }
+  netStatus.textContent = "Connecting to matchmaking server...";
+  // Using a stable public Socket.io echo/relay server
+  socket = io('https://removeClassification.onrender.com', { transports: ['websocket', 'polling'] });
   
-  peer = new Peer({
-    host: '0.peerjs.com',
-    port: 443,
-    secure: true,
-    debug: 1
+  socket.on('connect', () => {
+    netStatus.textContent = "Connected!";
+    cb();
   });
-
-  peer.on('open', id => {
-    myPeerId = id;
-    netStatus.textContent = "Connected to server!";
-    callback();
-  });
-  peer.on('connection', c => {
-    conn = c;
-    isHost = true;
-    isMultiplayer = true;
-    setupConn();
-    startMultiplayer();
-  });
-  peer.on('error', err => { 
-    netStatus.textContent = "Connection Error: " + err.type;
+  socket.on('connect_error', () => {
+    netStatus.textContent = "Server connection failed. Try again.";
   });
 }
 
 document.getElementById('btn-host').onclick = () => {
-  initPeer(() => {
-    const code = myPeerId ? myPeerId.substring(0, 5).toUpperCase() : "ROOM1";
-    netStatus.innerHTML = `Room Code: <b style="font-size:18px;color:#fff">${code}</b> (Share this with your friend)`;
+  connectSocket(() => {
+    roomCode = Math.random().toString(36).substring(2, 7).toUpperCase();
+    socket.emit('host-room', roomCode);
+    isHost = true;
+    isMultiplayer = true;
+    netStatus.innerHTML = `Room Code: <b style="font-size:18px;color:#fff">${roomCode}</b> (Waiting for friend...)`;
+    
+    socket.on('player-joined', () => {
+      netStatus.textContent = "Friend Joined! Starting Game...";
+      setTimeout(startMultiplayer, 800);
+    });
   });
 };
 
 document.getElementById('btn-join').onclick = () => {
-  const code = document.getElementById('room-input').value.trim();
+  const code = document.getElementById('room-input').value.trim().toUpperCase();
   if(!code) return alert("Please enter a room code!");
-  initPeer(() => {
-    netStatus.textContent = "Connecting to Host...";
-    conn = peer.connect(code);
-    setupConn();
-    conn.on('open', () => {
-      isHost = false;
-      isMultiplayer = true;
-      netStatus.textContent = "Connected to Friend! Starting...";
-      setTimeout(startMultiplayer, 500);
-    });
-    conn.on('error', err => {
-      netStatus.textContent = "Failed to connect to room.";
+  connectSocket(() => {
+    roomCode = code;
+    socket.emit('join-room', roomCode, (success) => {
+      if(success) {
+        isHost = false;
+        isMultiplayer = true;
+        netStatus.textContent = "Connected to Host! Starting...";
+        setTimeout(startMultiplayer, 800);
+      } else {
+        netStatus.textContent = "Room not found or full!";
+      }
     });
   });
 };
 
-function setupConn(){
-  conn.on('data', data => {
-    if(isHost) {
-      if(data.type === 'input') {
-        const p2 = ships[3];
-        if(p2) { p2.inp = data.inp; if(data.fire) fire(p2, data.ang); }
-      }
-    } else {
-      if(data.type === 'state') {
-        ships = data.ships;
-        score = data.score;
-        timeLeft = data.timeLeft;
-        balls = data.balls;
-        fx = data.fx;
-      }
-    }
-  });
-}
-
+// Network sync listeners
 function startMultiplayer(){
+  NAMES[0] = isHost ? "Player 1 (Host)" : "Player 2 (Guest)";
+  NAMES[3] = isHost ? "Player 2 (Guest)" : "Player 1 (Host)";
+  start();
+
   if(isHost) {
-    NAMES[0] = "Player 1 (Host)";
-    NAMES[3] = "Player 2 (Guest)";
-    start();
+    setInterval(() => {
+      if(socket && isMultiplayer) {
+        socket.emit('game-state', roomCode, { ships, score, timeLeft, balls, fx });
+      }
+    }, 50); // 20 updates per second
+    
+    socket.on('client-input', (data) => {
+      const p2 = ships[3];
+      if(p2) {
+        p2.inp = data.inp;
+        if(data.fire) fire(p2, data.ang);
+      }
+    });
+  } else {
+    socket.on('game-state', (state) => {
+      ships = state.ships;
+      score = state.score;
+      timeLeft = state.timeLeft;
+      balls = state.balls;
+      fx = state.fx;
+    });
+
+    setInterval(() => {
+      if(socket && isMultiplayer) {
+        const myInp = {L:keys.a||keys.arrowleft, R:keys.d||keys.arrowright, F:keys.w||keys.arrowup, B:keys.s||keys.arrowdown};
+        const me = ships[3];
+        const ang = me ? Math.atan2(mouse.y-me.y, mouse.x-me.x) : 0;
+        socket.emit('client-input', roomCode, { inp: myInp, fire: false, ang });
+      }
+    }, 50);
   }
 }
 
+// --- Terrain & Realistic Islands ---
 const rad=(is,t)=>Math.max(.55,1+.2*Math.sin(2*t+is.p[0])+.16*Math.sin(3*t+is.p[1])+.1*Math.sin(5*t+is.p[2])+.06*Math.sin(8*t+is.p[3]))*is.R;
 const info=(is,x,y)=>{const ux=(x-is.x)/is.ex,uy=(y-is.y)/is.ey,d=Math.hypot(ux,uy),t=Math.atan2(uy,ux),r=rad(is,t);return{ux,uy,d,t,r,edge:(d-r)*(is.ex+is.ey)/2}};
 const mkI=(x,y,R,ex,ey)=>{const is={x,y,R,ex,ey,p:[rnd()*6.28,rnd()*6.28,rnd()*6.28,rnd()*6.28]};
@@ -214,17 +223,6 @@ function updShip(s,dt){
 
 function update(dt){
  T+=dt;timeLeft-=dt;if(timeLeft<=0){timeLeft=0;return finish()}
-
- if(isMultiplayer) {
-   if(isHost && conn) {
-     conn.send({type:'state', ships, score, timeLeft, balls, fx});
-   } else if(!isHost && conn) {
-     const myInp = {L:keys.a||keys.arrowleft, R:keys.d||keys.arrowright, F:keys.w||keys.arrowup, B:keys.s||keys.arrowdown};
-     const me = ships[3];
-     const ang = me ? Math.atan2(mouse.y-me.y, mouse.x-me.x) : 0;
-     conn.send({type:'input', inp: myInp, fire: false, ang});
-   }
- }
 
  if(!isMultiplayer || isHost) {
    ships.forEach(s=>updShip(s,dt));
@@ -361,7 +359,7 @@ function draw(){
  const me=isMultiplayer && !isHost ? ships[3] : ships[0];
  if(me&&state==='play'){
   if(!me.dead){ctx.strokeStyle='rgba(255,240,170,.65)';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(ms.x,ms.y,14,9,0,0,7);ctx.moveTo(ms.x-20,ms.y);ctx.lineTo(ms.x+20,ms.y);ctx.moveTo(ms.x,ms.y-13);ctx.lineTo(ms.x,ms.y+13);ctx.stroke()}
-  else{ctx.fillStyle='#f6ecc8';font='40px "Pirata One",Georgia,serif';ctx.textAlign='center';ctx.fillText('Sunk! Back in '+Math.ceil(me.resp)+'...',W/2,(H-HUD)/2)}
+  else{ctx.fillStyle='#f6ecc8';ctx.font='40px "Pirata One",Georgia,serif';ctx.textAlign='center';ctx.fillText('Sunk! Back in '+Math.ceil(me.resp)+'...',W/2,(H-HUD)/2)}
  }
  const mw=Math.min(190,W*.3),mh=mw*WH/WW,mx=W-mw-12,my=12,f=mw/WW;
  ctx.fillStyle='rgba(8,34,38,.65)';ctx.fillRect(mx,my,mw,mh);ctx.strokeStyle='rgba(246,236,200,.5)';ctx.lineWidth=1;ctx.strokeRect(mx,my,mw,mh);
@@ -384,7 +382,8 @@ const shoot=()=>{
   if(state!=='play') return;
   if(isMultiplayer && !isHost) {
     const me = ships[3];
-    if(me && conn) conn.send({type:'input', inp:{}, fire: true, ang: Math.atan2(mouse.y-me.y, mouse.x-me.x)});
+    const ang = me ? Math.atan2(mouse.y-me.y, mouse.x-me.x) : 0;
+    if(me && socket) socket.emit('client-input', roomCode, { inp:{}, fire: true, ang });
   } else {
     const me = ships[0];
     if(me) fire(me, Math.atan2(mouse.y-me.y, mouse.x-me.x));
